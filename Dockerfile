@@ -6,6 +6,7 @@ RUN apt-get install -y \
       libxml2-dev libxslt1-dev libsnappy-dev liblzma-dev
 RUN pip install django-toolbelt djangorestframework happybase jsonschema cbor
 RUN pip install --pre dossier.models
+RUN python -m nltk.downloader -d /usr/share/nltk_data all
 ADD . /app
 ENV MEMEX_API_DATABASES_DEFAULT_ENGINE django.db.backends.sqlite3
 ENV MEMEX_API_DATABASES_DEFAULT_NAME /app/app.db
