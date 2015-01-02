@@ -8,8 +8,13 @@ import jsonschema
 
 from django.core.exceptions import ValidationError
 from django.utils.text import slugify
+import gensim.models
 from rest_framework.views import APIView
 from rest_framework.response import Response
+
+from dossier.store import Store
+from dossier.models import etl
+import kvlayer
 
 import settings
 
@@ -27,7 +32,7 @@ class ArtifactList(APIView):
         for doc in docs:
             if expand:
                 response.append(broker.strip_indices(doc))
-            else:  
+            else:
                 response.append(doc)
         return Response(response)
     def post(self, request, format=None):
@@ -35,7 +40,7 @@ class ArtifactList(APIView):
         broker = ArtifactBroker(settings.API_ARTIFACT_MANAGER_BACKEND)
         if type(request.DATA) is list:
             response = []
-            for data in request.DATA: 
+            for data in request.DATA:
                 response.append(broker.strip_indices(broker.save(data)))
         else:
             response = broker.strip_indices(broker.save(request.DATA))
@@ -72,14 +77,14 @@ class ArtifactSearch(APIView):
 
 class ArtifactBroker(GenericRecordBroker):
 
-    SCHEMA = { 
+    SCHEMA = {
         "type": "object",
         "properties": {
-            "key": { 
-                "type": "string", 
+            "key": {
+                "type": "string",
             },
             "url": {
-                "type": "string", 
+                "type": "string",
             },
             "timestamp": {
                 "type": "number",
@@ -94,7 +99,7 @@ class ArtifactBroker(GenericRecordBroker):
                         "type": "string",
                         "pattern": "^[a-zA-Z]+$",
                     },
-                }, 
+                },
                 "required": [
                     "method",
                 ],
@@ -254,7 +259,7 @@ class ArtifactBroker(GenericRecordBroker):
 
     def validate_index(self, key, value):
         pass
-    
+
     def add_index(self, doc, key, value):
         try:
             self.validate_index(key, value)
@@ -272,7 +277,7 @@ class ArtifactBroker(GenericRecordBroker):
         return doc
 
 class HbaseArtifactBackend(AbstractBackend):
-    
+
     SERDE = True
 
     def __init__(self):
@@ -296,7 +301,7 @@ class HbaseArtifactBackend(AbstractBackend):
                 kk = key.split("__")[-1]
                 keys.append(kk)
         elif start and stop:
-            for key, data in table.scan(row_start=start, row_stop=stop, limit=limit):    
+            for key, data in table.scan(row_start=start, row_stop=stop, limit=limit):
                 kk = key.split("__")[-1]
                 keys.append(kk)
         return keys
@@ -308,7 +313,7 @@ class HbaseArtifactBackend(AbstractBackend):
 
 class ModelArtifactBackend(AbstractBackend):
 
-    SERDE = True 
+    SERDE = True
 
     def get(self, key):
         obj = Artifact.objects.get(key=key)
@@ -330,7 +335,7 @@ class ModelArtifactBackend(AbstractBackend):
                 key = obj.key.split("__")[-1]
                 keys.append(key)
         elif start and stop:
-            for obj in ArtifactIndex.objects.filter(key__gte=start, key__lte=stop):    
+            for obj in ArtifactIndex.objects.filter(key__gte=start, key__lte=stop):
                 key = obj.key.split("__")[-1]
                 keys.append(key)
         return keys
@@ -345,13 +350,15 @@ class HbaseFlatArtifactBackend(AbstractBackend):
     SERDE = False
 
     def __init__(self):
+        self._dossier_store = None
+        self._tfidf = None
         self.connection = happybase.Connection(host=settings.HBASE_HOST, port=int(settings.HBASE_PORT), table_prefix=settings.HBASE_TABLE_PREFIX)
         self.mirror = None
         if settings.HBASE_MIRROR_HOST is not None:
-	    try:
+            try:
                 self.mirror = happybase.Connection(host=settings.HBASE_MIRROR_HOST, port=int(settings.HBASE_MIRROR_PORT), table_prefix=settings.HBASE_MIRROR_TABLE_PREFIX)
             except:
-		pass
+                pass
 
     def get(self, key):
         row = self.connection.table('artifact').row(key)
@@ -366,6 +373,7 @@ class HbaseFlatArtifactBackend(AbstractBackend):
         for index in indices:
             kk = "{}__{}__{}".format(index['key'], index['value'], key)
             self.index(kk)
+        self.put_fc(key, data)
         return self.get(key)
 
     def delete(self, key):
@@ -381,7 +389,7 @@ class HbaseFlatArtifactBackend(AbstractBackend):
                 kk = key.split("__")[-1]
                 keys.append(kk)
         elif start and stop:
-            for key, data in table.scan(row_start=start, row_stop=stop, limit=limit):    
+            for key, data in table.scan(row_start=start, row_stop=stop, limit=limit):
                 kk = key.split("__")[-1]
                 keys.append(kk)
         return keys
@@ -451,3 +459,29 @@ class HbaseFlatArtifactBackend(AbstractBackend):
             if mm is not None:
                 data['indices'].append({'key':mm.group('key'), 'value': vv})
         return data
+
+    @property
+    def dossier_store(self):
+        if self._dossier_store is None:
+            host_port = '%s:%s' % (settings.HBASE_HOST, settings.HBASE_PORT)
+            config = {
+                'storage_type': 'hbase',
+                'storage_addresses': [host_port],
+                'app_name': 'dossierstack',
+                'namespace': 'memex',
+            }
+            cli = kvlayer.client(config=config)
+            self._dossier_store = Store(cli)
+        return self._dossier_store
+
+    @property
+    def tfidf(self):
+        if self._tfidf is None:
+            self._tfidf = gensim.models.TfidfModel.load(
+                settings.DOSSIER_STACK_TFIDF_MODEL)
+        return self._tfidf
+
+    def put_fc(self, key, data):
+        cid, fc = etl.row_to_content_obj((key, data))
+        etl.add_sip_to_fc(fc, self.tfidf)
+        self.dossier_store.put([(cid, fc)])
