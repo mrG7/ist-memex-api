@@ -464,6 +464,7 @@ class HbaseFlatArtifactBackend(AbstractBackend):
     def dossier_store(self):
         if self._dossier_store is None:
             host_port = '%s:%s' % (settings.HBASE_HOST, settings.HBASE_PORT)
+            indexes = ['bowNP_sip', 'phone', 'region']
             config = {
                 'storage_type': 'hbase',
                 'storage_addresses': [host_port],
@@ -471,7 +472,7 @@ class HbaseFlatArtifactBackend(AbstractBackend):
                 'namespace': 'memex',
             }
             cli = kvlayer.client(config=config)
-            self._dossier_store = Store(cli)
+            self._dossier_store = Store(cli, feature_indexes=indexes)
         return self._dossier_store
 
     @property
